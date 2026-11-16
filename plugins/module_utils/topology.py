@@ -16,6 +16,7 @@ Public surface:
     BgpInput, BgpNeighborInput, HaNodeInput, HaInput,
     StaticRouteInput, RoutesInput, SegmentConfigInput,
     LoopbackOspfInput, LoopbackInterfaceInput,
+    VpnHubInput, DynamicVpnInput, EdgeToEdgeDetailInput, EdgeToEdgeHubInput, VpnInput,
     BizPolicySlaInput, BizPolicyQosInput, BizPolicyMatchInput, BizPolicyActionInput, BizPolicyRuleInput,
     EdgeSite, EdgeSpec, TopologyConfig
 
@@ -25,17 +26,20 @@ Public surface:
   Apply functions (ConfigPipeline patches):
     apply_wan_links, apply_routed_interfaces, apply_switched_interfaces,
     apply_vlans, apply_wan_link_settings, apply_bgp, apply_routes, apply_ha,
-    apply_loopback_interfaces, apply_bizpolicy
+    apply_loopback_interfaces, apply_vpn, apply_bizpolicy
 
   Resource orchestrators:
     ensure_segment, create_profile_only, attach_segments_to_profile,
     enable_console_firewall, ensure_profile, create_edge_only, ensure_edge
+    reject_hub_clusters, resolve_vpn_hubs, resolve_spec_hubs,
+    sync_profile_vpn_hubs
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
+from uuid import UUID
 
 from loguru import logger
 from pydantic import BaseModel, Field, model_validator
@@ -58,6 +62,7 @@ from pyvelo.client.models.configuration.device_settings.lan import LanPortMode
 from pyvelo.client.models.configuration.device_settings.refs import (
     DeviceSettingsRefs,
     DeviceSettingsSegmentRef,
+    DeviceSettingsVpnEdgeHubRef,
 )
 from pyvelo.client.models.configuration.device_settings.segment import (
     BgpNeighbor,
@@ -66,6 +71,7 @@ from pyvelo.client.models.configuration.device_settings.segment import (
     DnsProvider,
     DynamicVpnConfig,
     EdgeToEdgeDetail,
+    EdgeToEdgeHub,
     SegmentAuthentication,
     SegmentBfd,
     SegmentBgp,
@@ -81,6 +87,7 @@ from pyvelo.client.models.configuration.device_settings.segment import (
     SegmentSyslog,
     SegmentVpn,
     StaticRoute,
+    VpnHub as PyvVpnHub,
 )
 from pyvelo.client.models.configuration.firewall.rule_action import OutboundRuleAction
 from pyvelo.client.models.configuration.firewall.rule_match import OutboundRuleMatch
@@ -100,7 +107,17 @@ from pyvelo.client.models.configuration.qos.scheduler import QosScheduler, QosSe
 from pyvelo.client.models.configuration.qos.segment import CosMapping, QosSegment
 from pyvelo.client.models.configuration.wan.link import WanLink
 from pyvelo.client.models.enterprise import NetworkSegmentData
-from pyvelo.client.schemas.edge import CreateEdge, CreateEdgeResult, Site
+from pyvelo.client.schemas.edge import (
+    CreateEdge,
+    CreateEdgeResult,
+    DisableEdgeBackHaul,
+    DisableEdgeHub,
+    DisableEdgeToEdgeBridge,
+    EnableEdgeBackHaul,
+    EnableEdgeHub,
+    EnableEdgeToEdgeBridge,
+    Site,
+)
 from pyvelo.client.schemas.enterprise import (
     GetEnterpriseEdges,
     GetEnterpriseNetworkSegments,
@@ -308,6 +325,46 @@ class BgpInput(BaseModel):
     holdtime: str = "180"
     enable_graceful_restart: bool = False
     neighbors: list[BgpNeighborInput] = Field(default_factory=list)
+
+
+class VpnHubInput(BaseModel):
+    name: str
+    type: Literal["edgeHub", "edgeHubCluster"]
+    logical_id: str | None = None
+    edge_id: int | None = None
+
+
+class DynamicVpnInput(BaseModel):
+    enabled: bool = True
+    type: Literal["DIRECT", "RELAY"] = "DIRECT"
+    timeout: int = 180
+
+
+class EdgeToEdgeDetailInput(BaseModel):
+    encryption_protocol: Literal["GROUP_IPSEC", "AES_128_GCM", "AES_256_GCM"] = (
+        "GROUP_IPSEC"
+    )
+    use_cloud_gateway: bool = True
+    auto_select_vpn_hubs: bool = False
+    dynamic: DynamicVpnInput | None = None
+    vpn_hubs: list[VpnHubInput] = Field(default_factory=list)
+
+
+class EdgeToEdgeHubInput(BaseModel):
+    enabled: bool = False
+    vpn_hubs: list[VpnHubInput] = Field(default_factory=list)
+
+
+class VpnInput(BaseModel):
+    """VPN config — maps to device_settings.segments.<segment>.vpn (ProfileOnly)."""
+
+    segment_id: str = "Global Segment"
+    enabled: bool = True
+    edge_to_edge: bool = False
+    edge_to_data_center: bool = False
+    conditional_backhaul: bool = False
+    edge_to_edge_detail: EdgeToEdgeDetailInput | None = None
+    hub_edges: EdgeToEdgeHubInput | None = None
 
 
 class HaNodeInput(BaseModel):
@@ -866,6 +923,507 @@ def _attach_device_settings_refs(
     return True
 
 
+_HUB_ROLE = "hub"
+_BACKHAUL_ROLE = "backhaul"
+_E2E_ROLE = "e2e"
+
+
+@dataclass
+class HubRoleDiff:
+    enable_hub: list[VpnHubInput] = field(default_factory=list)
+    enable_backhaul: list[VpnHubInput] = field(default_factory=list)
+    enable_e2e: list[VpnHubInput] = field(default_factory=list)
+    disable_backhaul: list[VpnHubInput] = field(default_factory=list)
+    disable_e2e: list[VpnHubInput] = field(default_factory=list)
+    disable_hub: list[VpnHubInput] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not (
+            self.enable_hub
+            or self.enable_backhaul
+            or self.enable_e2e
+            or self.disable_backhaul
+            or self.disable_e2e
+            or self.disable_hub
+        )
+
+
+def _iter_spec_hubs(spec: VpnInput) -> list[VpnHubInput]:
+    hubs: list[VpnHubInput] = []
+    if spec.hub_edges and spec.hub_edges.vpn_hubs:
+        hubs.extend(spec.hub_edges.vpn_hubs)
+    if spec.edge_to_edge_detail and spec.edge_to_edge_detail.vpn_hubs:
+        hubs.extend(spec.edge_to_edge_detail.vpn_hubs)
+    return hubs
+
+
+def vpn_hubs_need_resolution(spec: VpnInput) -> bool:
+    return bool(_iter_spec_hubs(spec))
+
+
+def reject_hub_clusters(spec: VpnInput) -> None:
+    clusters = [h.name for h in _iter_spec_hubs(spec) if h.type != "edgeHub"]
+    if clusters:
+        names = ", ".join(clusters)
+        raise ValueError(
+            f"Hub cluster type is not supported yet (hubs: {names}). "
+            "Use type=edgeHub."
+        )
+
+
+def resolve_vpn_hubs(edges: list, hubs: list[VpnHubInput]) -> list[VpnHubInput]:
+    by_name = {e.name: e for e in edges if getattr(e, "name", None)}
+    resolved: list[VpnHubInput] = []
+    for hub in hubs:
+        edge = by_name.get(hub.name)
+        if edge is None:
+            available = ", ".join(n for n in sorted(by_name) if n)
+            raise ValueError(
+                f"Hub edge '{hub.name}' not found in enterprise. "
+                f"Available edges: {available}"
+            )
+        edge_id = getattr(edge, "id_", None)
+        if edge_id is None:
+            raise ValueError(f"Hub edge '{hub.name}' has no numeric id")
+        logical_id = hub.logical_id or str(edge.logical_id)
+        resolved.append(
+            VpnHubInput(
+                name=hub.name,
+                type=hub.type,
+                logical_id=logical_id,
+                edge_id=int(edge_id),
+            )
+        )
+    return resolved
+
+
+def resolve_spec_hubs(spec: VpnInput, edges: list) -> VpnInput:
+    """Fill hub edge_id and logical_id from the enterprise edge list."""
+    if spec.hub_edges and spec.hub_edges.vpn_hubs:
+        spec.hub_edges.vpn_hubs = resolve_vpn_hubs(edges, spec.hub_edges.vpn_hubs)
+    if spec.edge_to_edge_detail and spec.edge_to_edge_detail.vpn_hubs:
+        spec.edge_to_edge_detail.vpn_hubs = resolve_vpn_hubs(
+            edges, spec.edge_to_edge_detail.vpn_hubs
+        )
+    return spec
+
+
+def desired_hub_roles(spec: VpnInput) -> dict[int, set[str]]:
+    if not spec.enabled:
+        return {}
+    roles: dict[int, set[str]] = {}
+
+    def _add(hubs: list[VpnHubInput], *role_names: str) -> None:
+        for hub in hubs:
+            if hub.edge_id is None:
+                continue
+            roles.setdefault(hub.edge_id, set()).update(role_names)
+
+    hub_list = (
+        spec.hub_edges.vpn_hubs if spec.hub_edges and spec.hub_edges.enabled else []
+    )
+    if hub_list:
+        # Hub-edges are also backhaul hubs. Branch-to-Site (edgeToDataCenter) is
+        # a separate flag and requires Non-SD-WAN site refs.
+        _add(hub_list, _HUB_ROLE, _BACKHAUL_ROLE)
+
+    detail = spec.edge_to_edge_detail
+    if (
+        spec.edge_to_edge
+        and detail
+        and not detail.use_cloud_gateway
+        and detail.vpn_hubs
+    ):
+        _add(detail.vpn_hubs, _HUB_ROLE, _E2E_ROLE)
+    return roles
+
+
+def _ref_attr(ref: object, *names: str, default: Any = None) -> Any:
+    if isinstance(ref, dict):
+        for name in names:
+            if name in ref and ref[name] is not None:
+                return ref[name]
+        return default
+    for name in names:
+        value = getattr(ref, name, MISSING)
+        if value is not MISSING and value is not None:
+            return value
+    return default
+
+
+def _ref_data(ref: object) -> dict[str, Any]:
+    data = _ref_attr(ref, "data", default={})
+    if data is None or data is MISSING:
+        return {}
+    if isinstance(data, dict):
+        return data
+    dump = getattr(data, "model_dump", None)
+    if dump is not None:
+        return dump(by_alias=True, exclude_unset=True)
+    return {}
+
+
+def _ref_edge_logical_id(ref: object) -> str:
+    data = _ref_data(ref)
+    return str(data.get("logicalId") or data.get("logical_id") or "")
+
+
+def _ref_roles(ref: object) -> set[str]:
+    roles_raw = _ref_data(ref).get("roles") or {}
+    roles = {_HUB_ROLE}
+    if roles_raw.get("backHaulEdge") or roles_raw.get("back_haul_edge"):
+        roles.add(_BACKHAUL_ROLE)
+    if roles_raw.get("edgeToEdgeBridge") or roles_raw.get("edge_to_edge_bridge"):
+        roles.add(_E2E_ROLE)
+    return roles
+
+
+def _device_settings_refs(mod) -> DeviceSettingsRefs:
+    if isinstance(mod.refs, DeviceSettingsRefs):
+        return mod.refs
+    if mod.refs is MISSING or mod.refs is None:
+        refs = DeviceSettingsRefs()
+        mod.refs = refs
+        return refs
+    refs = DeviceSettingsRefs.model_validate(mod.refs)
+    mod.refs = refs
+    return refs
+
+
+def profile_vpn_segment_ids(state: ConfigState, segment_name: str) -> tuple[int, str]:
+    """Return (segmentObjectId, segmentLogicalId) for a named profile segment."""
+    mod = state.profile_config.device_settings
+    refs = _device_settings_refs(mod)
+    for ref in _segment_refs_list(refs.segment):
+        if _ref_attr(ref, "name") != segment_name:
+            continue
+        object_id = _ref_attr(ref, "enterprise_object_id", "enterpriseObjectId")
+        logical_id = _ref_attr(ref, "logical_id", "logicalId")
+        if object_id is None or logical_id in (None, ""):
+            raise ValueError(
+                f"Segment '{segment_name}' is attached but missing object/logical id"
+            )
+        return int(object_id), str(logical_id)
+    raise ValueError(
+        f"Segment '{segment_name}' is not attached to this profile. "
+        "Attach it with velocloud.api.profile before configuring CloudVPN."
+    )
+
+
+def _vpn_hub_refs_for_segment(state: ConfigState, segment_object_id: int) -> list:
+    refs = _device_settings_refs(state.profile_config.device_settings)
+    matched = []
+    for ref in _segment_refs_list(refs.vpn_edge_hub):
+        object_id = _ref_attr(ref, "segment_object_id", "segmentObjectId")
+        if object_id is None or int(object_id) == int(segment_object_id):
+            matched.append(ref)
+    return matched
+
+
+def current_hub_roles(
+    state: ConfigState, segment_object_id: int, edges: list
+) -> tuple[dict[int, set[str]], dict[int, VpnHubInput]]:
+    by_lid = {
+        str(e.logical_id): e
+        for e in edges
+        if getattr(e, "logical_id", None) is not None
+    }
+    roles: dict[int, set[str]] = {}
+    hubs: dict[int, VpnHubInput] = {}
+    for ref in _vpn_hub_refs_for_segment(state, segment_object_id):
+        lid = _ref_edge_logical_id(ref)
+        edge = by_lid.get(lid)
+        if edge is None:
+            logger.warning(
+                "Existing VPN hub ref logicalId {} is not in the enterprise edge list",
+                lid,
+            )
+            continue
+        edge_id = int(edge.id_)
+        name = getattr(edge, "name", None) or _ref_attr(ref, "name") or lid
+        roles[edge_id] = _ref_roles(ref)
+        hubs[edge_id] = VpnHubInput(
+            name=name, type="edgeHub", logical_id=lid, edge_id=edge_id
+        )
+    return roles, hubs
+
+
+def _hubs_by_edge_id(spec: VpnInput) -> dict[int, VpnHubInput]:
+    out: dict[int, VpnHubInput] = {}
+    for hub in _iter_spec_hubs(spec):
+        if hub.edge_id is not None:
+            out[hub.edge_id] = hub
+    return out
+
+
+def diff_hub_roles(
+    desired: dict[int, set[str]],
+    current: dict[int, set[str]],
+    hubs: dict[int, VpnHubInput],
+) -> HubRoleDiff:
+    def _ordered(edge_ids: list[int]) -> list[VpnHubInput]:
+        present = [hubs[i] for i in edge_ids if i in hubs]
+        return sorted(present, key=lambda h: h.name)
+
+    enable_hub: list[int] = []
+    enable_backhaul: list[int] = []
+    enable_e2e: list[int] = []
+    disable_backhaul: list[int] = []
+    disable_e2e: list[int] = []
+    disable_hub: list[int] = []
+    for edge_id in set(desired) | set(current):
+        want = desired.get(edge_id, set())
+        have = current.get(edge_id, set())
+        if _HUB_ROLE in want and _HUB_ROLE not in have:
+            enable_hub.append(edge_id)
+        if _BACKHAUL_ROLE in want and _BACKHAUL_ROLE not in have:
+            enable_backhaul.append(edge_id)
+        if _E2E_ROLE in want and _E2E_ROLE not in have:
+            enable_e2e.append(edge_id)
+        if _BACKHAUL_ROLE in have and _BACKHAUL_ROLE not in want:
+            disable_backhaul.append(edge_id)
+        if _E2E_ROLE in have and _E2E_ROLE not in want:
+            disable_e2e.append(edge_id)
+        if _HUB_ROLE in have and _HUB_ROLE not in want:
+            disable_hub.append(edge_id)
+    return HubRoleDiff(
+        enable_hub=_ordered(enable_hub),
+        enable_backhaul=_ordered(enable_backhaul),
+        enable_e2e=_ordered(enable_e2e),
+        disable_backhaul=_ordered(disable_backhaul),
+        disable_e2e=_ordered(disable_e2e),
+        disable_hub=_ordered(disable_hub),
+    )
+
+
+def _hub_request_kwargs(
+    hub: VpnHubInput,
+    profile_id: int,
+    module_id: int,
+    segment_object_id: int,
+    enterprise_id: int,
+) -> dict[str, int]:
+    if hub.edge_id is None:
+        raise ValueError(f"Hub edge '{hub.name}' is missing a numeric id")
+    return dict(
+        id_=hub.edge_id,
+        configuration_id=profile_id,
+        module_id=module_id,
+        segment_object_id=segment_object_id,
+        enterprise_id=enterprise_id,
+    )
+
+
+def _as_uuid(value: Any) -> UUID:
+    return value if isinstance(value, UUID) else UUID(str(value))
+
+
+def _hub_ref_from_identity(
+    *,
+    hub: VpnHubInput,
+    roles: set[str],
+    service_id: int,
+    service_logical_id: Any,
+    profile_id: int,
+    module_id: int,
+    segment_object_id: int,
+    segment_logical_id: str,
+) -> DeviceSettingsVpnEdgeHubRef:
+    return DeviceSettingsVpnEdgeHubRef(
+        ref="deviceSettings:vpn:edgeHub",
+        object_="NETWORK_SERVICE",
+        type_="edgeHub",
+        configuration_id=profile_id,
+        module_id=module_id,
+        logical_id=_as_uuid(service_logical_id),
+        enterprise_object_id=service_id,
+        name=hub.name,
+        segment_logical_id=_as_uuid(segment_logical_id),
+        segment_object_id=segment_object_id,
+        data={
+            "logicalId": hub.logical_id,
+            "roles": {
+                "edgeHub": True,
+                "backHaulEdge": _BACKHAUL_ROLE in roles,
+                "edgeToEdgeBridge": _E2E_ROLE in roles,
+            },
+        },
+    )
+
+
+def _replace_segment_vpn_hub_refs(
+    state: ConfigState,
+    segment_object_id: int,
+    new_refs: list[DeviceSettingsVpnEdgeHubRef],
+) -> bool:
+    mod = state.profile_config.device_settings
+    refs = _device_settings_refs(mod)
+    existing = _segment_refs_list(refs.vpn_edge_hub)
+    kept = []
+    for ref in existing:
+        object_id = _ref_attr(ref, "segment_object_id", "segmentObjectId")
+        if object_id is not None and int(object_id) != int(segment_object_id):
+            kept.append(ref)
+    updated = kept + new_refs
+    if not updated:
+        if refs.vpn_edge_hub is MISSING:
+            return False
+        refs.vpn_edge_hub = MISSING
+        mod.refs = refs
+        return True
+    refs.vpn_edge_hub = updated
+    mod.refs = refs
+    return True
+
+
+async def sync_profile_vpn_hubs(
+    client,
+    state: ConfigState,
+    spec: VpnInput,
+    *,
+    enterprise_id: int,
+    edges: list,
+    check_mode: bool,
+) -> bool:
+    """Enable/disable hub roles and write deviceSettings:vpn:edgeHub refs.
+
+    Returns True if hub roles or refs changed, or would change in check mode.
+    """
+    reject_hub_clusters(spec)
+    refs_obj = state.profile_config.device_settings.refs
+    existing_vpn_hubs = (
+        _segment_refs_list(refs_obj.vpn_edge_hub)
+        if isinstance(refs_obj, DeviceSettingsRefs)
+        else []
+    )
+    if not vpn_hubs_need_resolution(spec) and not existing_vpn_hubs:
+        return False
+
+    profile_id = state.profile_config.id_
+    module_id = state.profile_config.device_settings.id_
+    segment_object_id, segment_logical_id = profile_vpn_segment_ids(
+        state, spec.segment_id
+    )
+    desired = desired_hub_roles(spec)
+    current, current_hubs = current_hub_roles(state, segment_object_id, edges)
+    hubs = {**current_hubs, **_hubs_by_edge_id(spec)}
+    diff = diff_hub_roles(desired, current, hubs)
+    existing_refs = _existing_hub_refs_by_edge_id(
+        state, segment_object_id, edges, current_hubs
+    )
+
+    changed = not diff.is_empty()
+    enable_hub_services: dict[int, Any] = {}
+    if not check_mode and not diff.is_empty():
+        for hub in diff.disable_backhaul:
+            await client.disable_edge_backhaul(
+                DisableEdgeBackHaul(
+                    **_hub_request_kwargs(
+                        hub, profile_id, module_id, segment_object_id, enterprise_id
+                    )
+                )
+            )
+        for hub in diff.disable_e2e:
+            await client.disable_edge_to_edge_bridge(
+                DisableEdgeToEdgeBridge(
+                    **_hub_request_kwargs(
+                        hub, profile_id, module_id, segment_object_id, enterprise_id
+                    )
+                )
+            )
+        for hub in diff.disable_hub:
+            await client.disable_edge_hub(
+                DisableEdgeHub(
+                    **_hub_request_kwargs(
+                        hub, profile_id, module_id, segment_object_id, enterprise_id
+                    )
+                )
+            )
+        for hub in diff.enable_hub:
+            enable_hub_services[hub.edge_id] = await client.enable_edge_hub(
+                EnableEdgeHub(
+                    **_hub_request_kwargs(
+                        hub, profile_id, module_id, segment_object_id, enterprise_id
+                    )
+                )
+            )
+        for hub in diff.enable_backhaul:
+            await client.enable_edge_backhaul(
+                EnableEdgeBackHaul(
+                    **_hub_request_kwargs(
+                        hub, profile_id, module_id, segment_object_id, enterprise_id
+                    )
+                )
+            )
+        for hub in diff.enable_e2e:
+            await client.enable_edge_to_edge_bridge(
+                EnableEdgeToEdgeBridge(
+                    **_hub_request_kwargs(
+                        hub, profile_id, module_id, segment_object_id, enterprise_id
+                    )
+                )
+            )
+
+    if check_mode or diff.is_empty():
+        return changed
+
+    new_refs: list[DeviceSettingsVpnEdgeHubRef] = []
+    for edge_id, roles in desired.items():
+        hub = hubs.get(edge_id)
+        if hub is None or hub.logical_id is None:
+            continue
+        service = enable_hub_services.get(edge_id)
+        existing = existing_refs.get(edge_id)
+        if service is not None:
+            service_id = service.id_
+            service_lid = service.logical_id
+        elif existing is not None:
+            service_id = _ref_attr(
+                existing, "enterprise_object_id", "enterpriseObjectId"
+            )
+            service_lid = _ref_attr(existing, "logical_id", "logicalId")
+        else:
+            continue
+        new_refs.append(
+            _hub_ref_from_identity(
+                hub=hub,
+                roles=roles,
+                service_id=int(service_id),
+                service_logical_id=service_lid,
+                profile_id=profile_id,
+                module_id=module_id,
+                segment_object_id=segment_object_id,
+                segment_logical_id=segment_logical_id,
+            )
+        )
+    _replace_segment_vpn_hub_refs(state, segment_object_id, new_refs)
+    return True
+
+
+def _ref_edge_to_edge_id(ref: object, edges: list) -> int | None:
+    lid = _ref_edge_logical_id(ref)
+    for edge in edges:
+        if str(getattr(edge, "logical_id", "")) == lid:
+            return int(edge.id_)
+    return None
+
+
+def _existing_hub_refs_by_edge_id(
+    state: ConfigState,
+    segment_object_id: int,
+    edges: list,
+    current_hubs: dict[int, VpnHubInput],
+) -> dict[int, object]:
+    by_lid = {hub.logical_id: edge_id for edge_id, hub in current_hubs.items()}
+    out: dict[int, object] = {}
+    for ref in _vpn_hub_refs_for_segment(state, segment_object_id):
+        lid = _ref_edge_logical_id(ref)
+        edge_id = by_lid.get(lid) or _ref_edge_to_edge_id(ref, edges)
+        if edge_id is not None:
+            out[edge_id] = ref
+    return out
+
+
 def attach_segments_to_profile(
     state: ConfigState,
     seg: SegmentMetadata,
@@ -1204,6 +1762,73 @@ async def apply_bgp(
         state,
         module="device_settings",
         patch={"segments": {spec.segment_id: {"bgp": bgp_patch}}},
+    )
+
+
+async def apply_vpn(
+    pipeline: ConfigPipeline,
+    state: ConfigState,
+    spec: VpnInput,
+) -> ConfigState:
+    """Patch device_settings.segments.<segment>.vpn (ProfileOnly).
+
+    Builds pyvelo model instances so model_dump(by_alias=True) produces field
+    names and types the VCO accepts. Enabled hub_edges are also written as
+    backHaulEdges. edgeToDataCenter is Branch-to-Site and must stay false
+    unless Non-SD-WAN sites are selected.
+    """
+    vpn_kwargs: dict[str, Any] = {
+        "enabled": spec.enabled,
+        "edge_to_edge": spec.edge_to_edge,
+        "edge_to_data_center": spec.edge_to_data_center,
+        "conditional_backhaul": spec.conditional_backhaul,
+    }
+
+    if spec.edge_to_edge_detail is not None:
+        detail = spec.edge_to_edge_detail
+        detail_kwargs: dict[str, Any] = {
+            "encryption_protocol": detail.encryption_protocol,
+            "use_cloud_gateway": detail.use_cloud_gateway,
+            "auto_select_vpn_hubs": detail.auto_select_vpn_hubs,
+        }
+        if detail.dynamic is not None:
+            detail_kwargs["dynamic"] = DynamicVpnConfig(
+                enabled=detail.dynamic.enabled,
+                type_=detail.dynamic.type,
+                timeout=detail.dynamic.timeout,
+            )
+        if detail.vpn_hubs:
+            detail_kwargs["vpn_hubs"] = [
+                PyvVpnHub(name=h.name, type_=h.type, logical_id=h.logical_id)
+                for h in detail.vpn_hubs
+                if h.logical_id
+            ]
+        vpn_kwargs["edge_to_edge_detail"] = EdgeToEdgeDetail(**detail_kwargs)
+
+    if spec.hub_edges is not None:
+        hub_kwargs: dict[str, Any] = {"enabled": spec.hub_edges.enabled}
+        if spec.hub_edges.vpn_hubs:
+            hub_kwargs["vpn_hubs"] = [
+                PyvVpnHub(name=h.name, type_=h.type, logical_id=h.logical_id)
+                for h in spec.hub_edges.vpn_hubs
+                if h.logical_id
+            ]
+        vpn_kwargs["hub_edges"] = EdgeToEdgeHub(**hub_kwargs)
+
+    if spec.hub_edges and spec.hub_edges.enabled and spec.hub_edges.vpn_hubs:
+        vpn_kwargs["backhaul_edges"] = [
+            PyvVpnHub(name=h.name, type_=h.type, logical_id=h.logical_id)
+            for h in spec.hub_edges.vpn_hubs
+            if h.logical_id
+        ]
+
+    vpn_model = SegmentVpn(**vpn_kwargs)
+    vpn_patch = vpn_model.model_dump(by_alias=True, exclude_unset=True)
+
+    return await pipeline.apply(
+        state,
+        module="device_settings",
+        patch={"segments": {spec.segment_id: {"vpn": vpn_patch}}},
     )
 
 

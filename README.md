@@ -39,6 +39,7 @@ Use `hosts: localhost`, `connection: local` to run on the controller. `meta/exec
 | `velocloud.api.enterprise` | Create/update/delete enterprises and ensure their initial Quick Start Profile. |
 | `velocloud.api.segment` | Create/delete network segments. |
 | `velocloud.api.profile` | Create/delete configuration profiles, attach segments with device settings, QoS, and firewall factory defaults, enable firewall console. |
+| `velocloud.api.profile_vpn` | Patch CloudVPN on a profile segment, including hub designation and vpn edgeHub refs. |
 | `velocloud.api.edge` | Create/delete edges (no config patches). |
 | `velocloud.api.edge_lan` | Patch LAN routed interfaces, sub-interfaces, switched ports, VLAN networks. |
 | `velocloud.api.edge_wan` | Patch WAN-facing interfaces and `wan.links` settings. |

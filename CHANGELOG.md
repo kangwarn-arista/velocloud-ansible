@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `profile_vpn` to configure CloudVPN on a profile segment, including hub
+  designation (`enableEdgeForEdgeHub` / `BackHaul` / `EdgeToEdgeBridge`) and
+  `deviceSettings:vpn:edgeHub` refs. Hub edges are resolved by name; hub
+  clusters are not supported yet. `edge_to_data_center` is Branch-to-Site and
+  is not used to enable hub backhaul.
 - Pin ansible-test sanity in CI to Python 3.14, the only controller
   interpreter this collection supports, and require ansible-core 2.20 or later.
 - Pin the pytest job to `astral-sh/setup-uv@v10.3.3` (there is no floating `v10`
