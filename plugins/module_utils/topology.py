@@ -42,7 +42,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from loguru import logger
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import MISSING
 
 from pyvelo.client import VcoClient
@@ -207,7 +207,13 @@ class WanLinkInput(BaseModel):
 
 
 class WanLinkSettingsInput(BaseModel):
-    """WAN link properties — maps to wan.links (bandwidth, mode, discovery, etc.)."""
+    """WAN link properties — maps to wan.links (bandwidth, mode, discovery, etc.).
+
+    Extra keys are kept so any ``WanLink`` field in host vars is forwarded to
+    the WAN module patch (Pydantic would otherwise drop them silently).
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     name: str
     type: str = "WIRED"
@@ -216,6 +222,9 @@ class WanLinkSettingsInput(BaseModel):
     discovery: str = "AUTO_DISCOVERED"
     upstream_mbps: str | None = None
     downstream_mbps: str | None = None
+    # PRIVATE-mode links only; omitted from the patch when unset.
+    orchestrator_service_reachable: bool | None = None
+    orchestrator_service_reachable_backup: bool | None = None
 
 
 class RoutedInterfaceAddressing(BaseModel):
@@ -1725,7 +1734,7 @@ async def apply_wan_link_settings(
     state: ConfigState,
     specs: list[WanLinkSettingsInput],
 ) -> ConfigState:
-    """Patch wan.links for bandwidth, mode, discovery, and interface binding."""
+    """Patch wan.links for bandwidth, mode, discovery, reachability, and binding."""
     if not specs:
         return state
     patch: dict[str, Any] = {}

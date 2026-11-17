@@ -18,7 +18,7 @@ version_added: "0.1.0"
 
 description:
     - Patches C(device_settings.routed_interfaces) for WAN-facing (overlay-bearing)
-      ports and C(wan.links) for bandwidth/mode/discovery settings.
+      ports and C(wan.links) for bandwidth, mode, discovery, and reachability.
     - Drift detection is native via pyvelo C(ConfigPipeline.save).
     - Fails if the edge does not exist.
     - No purge — WAN links/settings already on the edge that are NOT listed are
@@ -65,7 +65,10 @@ options:
         elements: dict
         default: []
     wan_link_settings:
-        description: List of wan.links bandwidth/mode/discovery specs (see WanLinkSettingsInput).
+        description: >
+            List of wan.links specs (see WanLinkSettingsInput). Includes bandwidth,
+            mode, discovery, and PRIVATE-link orchestrator reachability flags.
+            Extra keys that match pyvelo WanLink fields are forwarded to the VCO.
         required: false
         type: list
         elements: dict
@@ -105,6 +108,8 @@ EXAMPLES = r"""
         interfaces: [GE3]
         mode: PRIVATE
         discovery: USER_DEFINED
+        orchestrator_service_reachable: true
+        orchestrator_service_reachable_backup: true
 """
 
 RETURN = r"""

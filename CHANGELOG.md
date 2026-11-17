@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep `orchestrator_service_reachable` and
+  `orchestrator_service_reachable_backup` on `wan_link_settings` (PRIVATE
+  links). Unknown `WanLink` keys are forwarded instead of being dropped.
 - Add `profile_vpn` to configure CloudVPN on a profile segment, including hub
   designation (`enableEdgeForEdgeHub` / `BackHaul` / `EdgeToEdgeBridge`) and
   `deviceSettings:vpn:edgeHub` refs. Hub edges are resolved by name; hub
