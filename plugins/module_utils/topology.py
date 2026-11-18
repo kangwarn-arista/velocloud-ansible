@@ -9,7 +9,7 @@ config-module patches used by the velocloud.api modules.
 Public surface:
 
   Pydantic input specs:
-    SegmentSpec, ProfileSpec, ProfileFirewallSpec,
+    SegmentSpec, ProfileSpec, ProfileFirewallSpec, ProfileFirewallSshSpec,
     WanLinkInput, WanLinkSettingsInput, WanAddressing,
     RoutedInterfaceInput, RoutedInterfaceAddressing, SubInterfaceInput,
     DhcpServerInput, SwitchedInterfaceInput, InterfaceConfig, VlanInput,
@@ -26,11 +26,12 @@ Public surface:
   Apply functions (ConfigPipeline patches):
     apply_wan_links, apply_routed_interfaces, apply_switched_interfaces,
     apply_vlans, apply_wan_link_settings, apply_bgp, apply_routes, apply_ha,
-    apply_loopback_interfaces, apply_vpn, apply_bizpolicy
+    apply_loopback_interfaces, apply_vpn, apply_bizpolicy, apply_profile_firewall
 
   Resource orchestrators:
     ensure_segment, create_profile_only, attach_segments_to_profile,
-    enable_console_firewall, ensure_profile, create_edge_only, ensure_edge
+    enable_console_firewall, firewall_requested, ensure_profile,
+    create_edge_only, ensure_edge
     reject_hub_clusters, resolve_vpn_hubs, resolve_spec_hubs,
     sync_profile_vpn_hubs
 """
@@ -96,6 +97,7 @@ from pyvelo.client.models.configuration.firewall.segment import FirewallSegment
 from pyvelo.client.models.configuration.firewall.services import (
     ConsoleService,
     FirewallServices,
+    FirewallServicesGroup,
 )
 from pyvelo.client.models.configuration.qos.rule import (
     QosRule,
@@ -179,8 +181,23 @@ class SegmentSpec(BaseModel):
     delegate_to_enterprise_proxy: bool = True
 
 
+class ProfileFirewallSshSpec(BaseModel):
+    """SSH service on a profile firewall (maps to pyvelo FirewallServicesGroup)."""
+
+    enabled: bool
+    allow_selected_ip: list[str] | None = None
+    allow_selected_ip_v6: list[str] | None = None
+    rule_logical_id: str | None = None
+
+
 class ProfileFirewallSpec(BaseModel):
     console_enabled: bool = False
+    ssh: ProfileFirewallSshSpec | None = None
+
+
+def firewall_requested(spec: ProfileFirewallSpec) -> bool:
+    """True when the spec asks to patch profile firewall services."""
+    return spec.console_enabled or spec.ssh is not None
 
 
 class ProfileSpec(BaseModel):
@@ -1483,15 +1500,31 @@ def attach_segments_to_profile(
     return mutated
 
 
-async def enable_console_firewall(
-    pipeline: ConfigPipeline, state: ConfigState
+async def apply_profile_firewall(
+    pipeline: ConfigPipeline, state: ConfigState, spec: ProfileFirewallSpec
 ) -> ConfigState:
-    """Enable firewall console access on a profile."""
-    services = FirewallServices(console=ConsoleService(enabled=True))
+    """Patch the profile firewall's services: console and SSH access."""
+    fields: dict[str, Any] = {}
+    if spec.console_enabled:
+        fields["console"] = ConsoleService(enabled=True)
+    if spec.ssh is not None:
+        fields["ssh"] = FirewallServicesGroup(**spec.ssh.model_dump(exclude_none=True))
+    if not fields:
+        return state
+    services = FirewallServices(**fields)
     return await pipeline.apply(
         state,
         module="firewall",
         patch={"services": services.model_dump(by_alias=False, exclude_unset=True)},
+    )
+
+
+async def enable_console_firewall(
+    pipeline: ConfigPipeline, state: ConfigState
+) -> ConfigState:
+    """Enable firewall console access on a profile."""
+    return await apply_profile_firewall(
+        pipeline, state, ProfileFirewallSpec(console_enabled=True)
     )
 
 
@@ -1518,16 +1551,25 @@ async def ensure_profile(
 ) -> int | None:
     """Create profile if missing, attach segments, apply firewall patch.
 
-    Returns profile_id if newly created, None if skipped.
+    Returns profile_id if newly created, None if the profile already existed.
+    Firewall services are still applied when the profile already exists.
     """
     existing = await client.get_enterprise_configurations(
         GetEnterpriseConfigurations(enterprise_id=enterprise_id)
     )
     match = next((p for p in existing if p.name == spec.name), None)
     if match is not None:
-        logger.info(
-            "Profile '{}' already exists (id={}). Skipping.", match.name, match.id_
-        )
+        if firewall_requested(spec.firewall):
+            state = await pipeline.load_profile(match.id_, enterprise_id=enterprise_id)
+            state = await apply_profile_firewall(pipeline, state, spec.firewall)
+            await pipeline.save(state)
+            logger.info(
+                "Firewall services applied for existing profile '{}'.", spec.name
+            )
+        else:
+            logger.info(
+                "Profile '{}' already exists (id={}). Skipping.", match.name, match.id_
+            )
         return None
 
     profile_id = await create_profile_only(client, enterprise_id, spec)
@@ -1556,9 +1598,9 @@ async def ensure_profile(
                 state, seg_meta, seg_record.type_, seg_record.id_
             )
 
-    if spec.firewall.console_enabled:
-        state = await enable_console_firewall(pipeline, state)
-        logger.info("Console access enabled for profile '{}'.", spec.name)
+    if firewall_requested(spec.firewall):
+        state = await apply_profile_firewall(pipeline, state, spec.firewall)
+        logger.info("Firewall services applied for profile '{}'.", spec.name)
 
     await pipeline.save(state)
     return profile_id

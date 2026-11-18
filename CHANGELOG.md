@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Apply profile firewall SSH access (`enabled` and `allow_selected_ip`) via
+  pyvelo `FirewallServicesGroup`. Firewall services are also patched on
+  existing profiles when name and description already match, so SSH and
+  console access do not require deleting and recreating the profile.
 - Keep `orchestrator_service_reachable` and
   `orchestrator_service_reachable_backup` on `wan_link_settings` (PRIVATE
   links). Unknown `WanLink` keys are forwarded instead of being dropped.

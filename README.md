@@ -38,7 +38,7 @@ Use `hosts: localhost`, `connection: local` to run on the controller. `meta/exec
 | `velocloud.api.gateway` | Create/update/delete gateway records without device activation. |
 | `velocloud.api.enterprise` | Create/update/delete enterprises and ensure their initial Quick Start Profile. |
 | `velocloud.api.segment` | Create/delete network segments. |
-| `velocloud.api.profile` | Create/delete configuration profiles, attach segments with device settings, QoS, and firewall factory defaults, enable firewall console. |
+| `velocloud.api.profile` | Create/delete configuration profiles, attach segments with device settings, QoS, and firewall factory defaults, and apply firewall console and SSH access. |
 | `velocloud.api.profile_vpn` | Patch CloudVPN on a profile segment, including hub designation and vpn edgeHub refs. |
 | `velocloud.api.edge` | Create/delete edges (no config patches). |
 | `velocloud.api.edge_lan` | Patch LAN routed interfaces, sub-interfaces, switched ports, VLAN networks. |
@@ -48,7 +48,7 @@ Use `hosts: localhost`, `connection: local` to run on the controller. `meta/exec
 | `velocloud.api.edge_loopback` | Patch loopback interfaces. |
 | `velocloud.api.edge_segment` | Patch per-segment settings. |
 
-The three `edge_*` patch modules use pyvelo's `ConfigPipeline` which natively diffs and saves only the modules that changed. The top-level CRUD modules (`segment`, `profile`, `edge`) skip-if-exists by default; pass `force: true` to delete and recreate on drift.
+The three `edge_*` patch modules use pyvelo's `ConfigPipeline` which natively diffs and saves only the modules that changed. The top-level CRUD modules (`segment`, `profile`, `edge`) skip-if-exists by default; pass `force: true` to delete and recreate on drift. `profile` still patches firewall console and SSH services on an existing profile when name and description already match.
 
 ## Authentication
 
