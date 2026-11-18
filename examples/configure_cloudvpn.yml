@@ -1,0 +1,38 @@
+---
+# Enable CloudVPN on Example-Profile and designate hub-1 as a hub.
+# Run create_edges.yml first so the hub name can be resolved.
+#
+#   uv run ansible-playbook examples/configure_cloudvpn.yml \
+#       -e vco_host=vco.example.com -e vco_enterprise_id=1
+#
+- name: Configure CloudVPN
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/auth.yml
+    - vars/cloudvpn.yml
+  pre_tasks:
+    - name: Load the saved API token
+      ansible.builtin.import_tasks: tasks/load_saved_token.yml
+
+    - name: Require an enterprise ID
+      ansible.builtin.assert:
+        that: vco_enterprise_id | default(0) | int > 0
+        fail_msg: Pass -e vco_enterprise_id=<id> from create_enterprise.yml.
+  tasks:
+    - name: Configure CloudVPN on "{{ item.profile }}"
+      velocloud.api.profile_vpn:
+        vco_host: "{{ vco_host }}"
+        api_token: "{{ vco_effective_token }}"
+        verify_ssl: "{{ vco_verify_ssl | default(true) }}"
+        enterprise_id: "{{ vco_enterprise_id | default(omit) }}"
+        profile: "{{ item.profile }}"
+        segment_id: "{{ item.segment_id | default('Global Segment') }}"
+        enabled: "{{ item.enabled | default(true) }}"
+        edge_to_edge: "{{ item.edge_to_edge | default(false) }}"
+        edge_to_data_center: "{{ item.edge_to_data_center | default(false) }}"
+        hub_edges: "{{ item.hub_edges | default({}) }}"
+      loop: "{{ velocloud_cloudvpn }}"
+      loop_control:
+        label: "{{ item.profile }} / {{ item.segment_id | default('Global Segment') }}"

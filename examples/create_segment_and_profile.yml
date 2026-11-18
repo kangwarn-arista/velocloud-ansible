@@ -1,0 +1,51 @@
+---
+# Create a network segment and a profile that attaches it, with console and SSH.
+#
+# Requires generate_token.yml and create_enterprise.yml.
+#
+#   uv run ansible-playbook examples/create_segment_and_profile.yml \
+#       -e vco_host=vco.example.com -e vco_enterprise_id=1
+#
+- name: Create a segment and a profile with firewall access
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/auth.yml
+    - vars/segment_profile.yml
+  vars:
+    sdk_args: &sdk_args
+      vco_host: "{{ vco_host }}"
+      api_token: "{{ vco_effective_token }}"
+      verify_ssl: "{{ vco_verify_ssl | default(true) }}"
+      enterprise_id: "{{ vco_enterprise_id | default(omit) }}"
+  pre_tasks:
+    - name: Load the saved API token
+      ansible.builtin.import_tasks: tasks/load_saved_token.yml
+
+    - name: Require an enterprise ID
+      ansible.builtin.assert:
+        that: vco_enterprise_id | default(0) | int > 0
+        fail_msg: Pass -e vco_enterprise_id=<id> from create_enterprise.yml.
+  tasks:
+    - name: Ensure segment "{{ item.name }}" exists
+      velocloud.api.segment:
+        <<: *sdk_args
+        name: "{{ item.name }}"
+        type: "{{ item.type | default('REGULAR') }}"
+        description: "{{ item.description | default('') }}"
+        segment_id: "{{ item.segment_id }}"
+      loop: "{{ velocloud_segments }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Ensure profile "{{ item.name }}" exists with firewall access
+      velocloud.api.profile:
+        <<: *sdk_args
+        name: "{{ item.name }}"
+        description: "{{ item.description | default('') }}"
+        segments: "{{ item.segments | default([]) }}"
+        firewall: "{{ item.firewall | default({}) }}"
+      loop: "{{ velocloud_profiles }}"
+      loop_control:
+        label: "{{ item.name }}"

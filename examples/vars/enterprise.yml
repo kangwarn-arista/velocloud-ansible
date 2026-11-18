@@ -1,0 +1,11 @@
+---
+# Create an enterprise and bind it to an existing gateway pool.
+# configuration_id is the operator template used only at creation.
+vco_gateway_pool_id: 1
+
+velocloud_enterprise:
+  name: Example Enterprise
+  gateway_pool_id: "{{ vco_gateway_pool_id }}"
+  configuration_id: 6
+  parameters:
+    description: Managed by Ansible

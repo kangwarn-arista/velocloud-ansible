@@ -1,0 +1,115 @@
+---
+# Hub plus an HA branch that exercises every interface module.
+# WAN addresses are RFC 5737 documentation prefixes. LAN uses RFC 1918.
+velocloud_edges:
+  - name: hub-1
+    profile: Example-Profile
+    model_number: virtual
+    site:
+      city: Chicago
+      state: IL
+      country: US
+    config:
+      wan_links:
+        - name: GE3
+          addressing: { type: STATIC, cidr: 203.0.113.10/24, gateway: 203.0.113.1 }
+          wan_overlay: USER_DEFINED
+          nat_direct: true
+        - name: GE4
+          addressing: { type: STATIC, cidr: 198.51.100.66/28, gateway: 198.51.100.65 }
+          wan_overlay: USER_DEFINED
+          nat_direct: true
+      wan_link_settings:
+        - name: MPLS
+          type: WIRED
+          interfaces: [GE3]
+          mode: PRIVATE
+          discovery: USER_DEFINED
+          orchestrator_service_reachable: true
+          orchestrator_service_reachable_backup: true
+        - name: INET
+          type: WIRED
+          interfaces: [GE4]
+          mode: PUBLIC
+          discovery: USER_DEFINED
+      routed_interfaces:
+        - name: GE2
+          segment_id: Corp Segment
+          addressing: { type: STATIC, cidr: 172.16.21.1/24 }
+          advertise: true
+          override: true
+      vlans:
+        - name: Corporate
+          vlan_id: 1
+          cidr: 10.10.0.1/24
+          segment_id: Global Segment
+          interfaces: []
+          advertise: false
+          dhcp_enabled: false
+  - name: branch-ha
+    profile: Example-Profile
+    model_number: virtual
+    site:
+      city: New York
+      state: NY
+      country: US
+    config:
+      wan_links:
+        - name: GE3
+          addressing: { type: STATIC, cidr: 198.51.100.2/28, gateway: 198.51.100.1 }
+          wan_overlay: USER_DEFINED
+          nat_direct: true
+        - name: GE4
+          addressing: { type: STATIC, cidr: 198.51.100.18/28, gateway: 198.51.100.17 }
+          wan_overlay: USER_DEFINED
+          nat_direct: true
+      wan_link_settings:
+        - name: ISP1
+          type: WIRED
+          interfaces: [GE3]
+          mode: PUBLIC
+          discovery: USER_DEFINED
+        - name: ISP2
+          type: WIRED
+          interfaces: [GE4]
+          mode: PUBLIC
+          discovery: USER_DEFINED
+      routed_interfaces:
+        - name: GE2
+          segment_id: Corp Segment
+          addressing: { type: STATIC, cidr: 172.16.10.1/24 }
+          advertise: true
+          override: true
+          subinterfaces:
+            - subinterface_id: 9
+              vlan_id: 9
+              segment_id: Global Segment
+              addressing: { type: STATIC, cidr: 172.16.9.1/24 }
+              advertise: true
+      switched_interfaces:
+        - name: GE5
+          port_mode: access
+          untagged_vlan: 1
+          vlan_ids: [1]
+          override: true
+      loopback_interfaces:
+        - name: LO9
+          cidr_ip: 192.0.2.64
+          advertise: false
+          description: Management loopback
+      vlans:
+        - name: Corporate
+          vlan_id: 1
+          cidr: 10.10.0.1/24
+          segment_id: Global Segment
+          interfaces: [GE5]
+          advertise: false
+          dhcp_enabled: false
+      ha:
+        enabled: true
+        interface: GE1
+        unique_lan_macs: true
+        unique_wan_macs: true
+        ha_graceful_switchover: false
+        ha_failover_count: 7
+        preempt_switchover: false

@@ -1,0 +1,7 @@
+---
+# Shared token-file location for generate_token.yml and the edge examples.
+# Override vco_token_file to store the token outside the collection tree.
+vco_base_url: "https://{{ vco_host | regex_replace('^https://', '') | regex_replace('/+$', '') }}"
+vco_token_file: "{{ playbook_dir }}/.tokens/{{ vco_host | hash('sha256') }}.token"
+vco_token_name: ansible-collection-example
+vco_token_lifetime_ms: 31536000000

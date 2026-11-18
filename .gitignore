@@ -1,0 +1,16 @@
+__pycache__/
+.pytest_cache/
+.venv/
+dist/
+*.tar.gz
+MANIFEST.json
+FILES.json
+tests/output/
+.sanity-tree/
+.example-col/
+.ansible-tmp/
+**/.tokens/
+CLAUDE.md
+AGENT.md
+AGENTS.md
+.cursor/

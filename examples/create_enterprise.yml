@@ -1,0 +1,29 @@
+---
+# Create an enterprise and bind it to an existing gateway pool.
+#
+#   uv run ansible-playbook examples/create_enterprise.yml -e @vco-vault.yml --ask-vault-pass
+#
+# Print the enterprise id; later edge playbooks need -e vco_enterprise_id=<id>.
+- name: Create an enterprise and assign a gateway pool
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/enterprise.yml
+  tasks:
+    - name: Ensure the enterprise exists and is bound to the gateway pool
+      velocloud.api.enterprise:
+        vco_host: "{{ vco_host }}"
+        username: "{{ vco_username | default(omit) }}"
+        password: "{{ vco_password | default(omit) }}"
+        api_token: "{{ vco_token | default(omit) }}"
+        verify_ssl: "{{ vco_verify_ssl | default(true) }}"
+        name: "{{ velocloud_enterprise.name }}"
+        gateway_pool_id: "{{ velocloud_enterprise.gateway_pool_id | int }}"
+        configuration_id: "{{ velocloud_enterprise.configuration_id | int }}"
+        parameters: "{{ velocloud_enterprise.parameters | default({}) }}"
+      register: enterprise_result
+
+    - name: Report enterprise ID
+      ansible.builtin.debug:
+        msg: "{{ velocloud_enterprise.name }} id={{ enterprise_result.enterprise.id | default('n/a') }} changed={{ enterprise_result.changed }}"

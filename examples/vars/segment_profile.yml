@@ -1,0 +1,18 @@
+---
+velocloud_segments:
+  - name: Corp Segment
+    type: REGULAR
+    description: Corporate overlay segment
+    segment_id: 99
+
+velocloud_profiles:
+  - name: Example-Profile
+    description: Dual-WAN profile with console and SSH access
+    segments:
+      - Corp Segment
+    firewall:
+      console_enabled: true
+      ssh:
+        enabled: true
+        allow_selected_ip:
+          - 192.0.2.1

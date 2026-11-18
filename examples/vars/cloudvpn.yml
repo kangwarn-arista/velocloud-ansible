@@ -1,0 +1,13 @@
+---
+# CloudVPN on Example-Profile. hub-1 must already exist (see create_edges.yml).
+velocloud_cloudvpn:
+  - profile: Example-Profile
+    segment_id: Global Segment
+    enabled: true
+    edge_to_edge: false
+    edge_to_data_center: false
+    hub_edges:
+      enabled: true
+      vpn_hubs:
+        - name: hub-1
+          type: edgeHub

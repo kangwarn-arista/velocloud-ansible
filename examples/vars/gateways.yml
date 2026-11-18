@@ -1,0 +1,21 @@
+---
+# Operator gateway records. Addresses are RFC 5737 documentation IPs.
+vco_gateway_pool_id: 1
+
+velocloud_gateways:
+  - name: gateway-west
+    ip_address: 192.0.2.10
+    gateway_pool_id: "{{ vco_gateway_pool_id }}"
+    service_state: IN_SERVICE
+    parameters:
+      site:
+        contactName: Network Operations
+        contactEmail: netops@example.com
+  - name: gateway-east
+    ip_address: 192.0.2.11
+    gateway_pool_id: "{{ vco_gateway_pool_id }}"
+    service_state: IN_SERVICE
+    parameters:
+      site:
+        contactName: Network Operations
+        contactEmail: netops@example.com

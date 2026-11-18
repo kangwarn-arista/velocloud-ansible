@@ -1,0 +1,36 @@
+---
+# Load an operator API token saved by generate_token.yml.
+# An explicit vco_token extra var takes precedence over the saved file.
+- name: Use an explicitly supplied token when available
+  ansible.builtin.set_fact:
+    vco_effective_token: "{{ vco_token | default('') | trim }}"
+  no_log: true
+
+- name: Check for a saved token file
+  ansible.builtin.stat:
+    path: "{{ vco_token_file }}"
+  register: saved_token_file
+
+- name: Require a token extra var or a saved token file
+  ansible.builtin.assert:
+    that: vco_effective_token | length > 0 or saved_token_file.stat.exists
+    fail_msg: >-
+      Run generate_token.yml once with vco_username and vco_password,
+      or pass -e vco_token=<token>.
+
+- name: Load the saved API token
+  ansible.builtin.slurp:
+    src: "{{ vco_token_file }}"
+  register: saved_token
+  when:
+    - vco_effective_token | length == 0
+    - saved_token_file.stat.exists
+  no_log: true
+
+- name: Use the saved API token for this run
+  ansible.builtin.set_fact:
+    vco_effective_token: "{{ saved_token.content | b64decode | trim }}"
+  when:
+    - vco_effective_token | length == 0
+    - saved_token_file.stat.exists
+  no_log: true

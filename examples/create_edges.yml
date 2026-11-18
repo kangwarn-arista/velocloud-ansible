@@ -1,0 +1,104 @@
+---
+# Create edges and configure every interface type: switched LAN, routed LAN
+# (including a VLAN sub-interface), loopback, and WAN overlay. Enable HA on
+# the branch. Print each edge's activation key.
+#
+# Requires generate_token.yml, create_enterprise.yml, and
+# create_segment_and_profile.yml.
+#
+#   uv run ansible-playbook examples/create_edges.yml \
+#       -e vco_host=vco.example.com -e vco_enterprise_id=1
+#
+- name: Create edges with LAN, routed, loopback, WAN, and HA
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/auth.yml
+    - vars/edges.yml
+  vars:
+    sdk_args: &sdk_args
+      vco_host: "{{ vco_host }}"
+      api_token: "{{ vco_effective_token }}"
+      verify_ssl: "{{ vco_verify_ssl | default(true) }}"
+      enterprise_id: "{{ vco_enterprise_id | default(omit) }}"
+  pre_tasks:
+    - name: Load the saved API token
+      ansible.builtin.import_tasks: tasks/load_saved_token.yml
+
+    - name: Require an enterprise ID
+      ansible.builtin.assert:
+        that: vco_enterprise_id | default(0) | int > 0
+        fail_msg: Pass -e vco_enterprise_id=<id> from create_enterprise.yml.
+  tasks:
+    - name: Ensure edge "{{ item.name }}" exists
+      velocloud.api.edge:
+        <<: *sdk_args
+        name: "{{ item.name }}"
+        profile: "{{ item.profile }}"
+        model_number: "{{ item.model_number | default('virtual') }}"
+        edge_license_id: "{{ item.edge_license_id | default(vco_edge_license_id | default(1)) }}"
+        site: "{{ item.site | default(omit) }}"
+      loop: "{{ velocloud_edges }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: edge_results
+
+    - name: Print edge IDs and activation keys
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item.name }}
+          id={{ item.edge.id | default('n/a') }}
+          activation_key={{ item.edge.activation_key | default('n/a') }}
+          changed={{ item.changed }}
+      loop: "{{ edge_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Configure switched LAN, routed interfaces, and VLANs
+      velocloud.api.edge_lan:
+        <<: *sdk_args
+        edge: "{{ item.name }}"
+        routed_interfaces: "{{ item.config.routed_interfaces | default([]) }}"
+        switched_interfaces: "{{ item.config.switched_interfaces | default([]) }}"
+        vlans: "{{ item.config.vlans | default([]) }}"
+      loop: "{{ velocloud_edges }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - (item.config.routed_interfaces | default([]) | length) > 0
+          or (item.config.switched_interfaces | default([]) | length) > 0
+          or (item.config.vlans | default([]) | length) > 0
+
+    - name: Configure loopback interfaces
+      velocloud.api.edge_loopback:
+        <<: *sdk_args
+        edge: "{{ item.name }}"
+        loopback_interfaces: "{{ item.config.loopback_interfaces | default([]) }}"
+      loop: "{{ velocloud_edges }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: (item.config.loopback_interfaces | default([]) | length) > 0
+
+    - name: Configure WAN overlay links
+      velocloud.api.edge_wan:
+        <<: *sdk_args
+        edge: "{{ item.name }}"
+        wan_links: "{{ item.config.wan_links | default([]) }}"
+        wan_link_settings: "{{ item.config.wan_link_settings | default([]) }}"
+      loop: "{{ velocloud_edges }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - (item.config.wan_links | default([]) | length) > 0
+          or (item.config.wan_link_settings | default([]) | length) > 0
+
+    - name: Configure HA
+      velocloud.api.edge_common:
+        <<: *sdk_args
+        edge: "{{ item.name }}"
+        ha: "{{ item.config.ha }}"
+      loop: "{{ velocloud_edges }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.config.ha is defined

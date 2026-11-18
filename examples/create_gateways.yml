@@ -1,0 +1,37 @@
+---
+# Create operator gateway records and assign them to a gateway pool.
+# Device activation is a separate workflow; this playbook only creates the records.
+#
+#   uv run ansible-playbook examples/create_gateways.yml -e @vco-vault.yml --ask-vault-pass
+#
+- name: Create gateways and assign them to a gateway pool
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/gateways.yml
+  tasks:
+    - name: Ensure gateway "{{ item.name }}" exists
+      velocloud.api.gateway:
+        vco_host: "{{ vco_host }}"
+        username: "{{ vco_username | default(omit) }}"
+        password: "{{ vco_password | default(omit) }}"
+        api_token: "{{ vco_token | default(omit) }}"
+        verify_ssl: "{{ vco_verify_ssl | default(true) }}"
+        name: "{{ item.name }}"
+        ip_address: "{{ item.ip_address }}"
+        service_state: "{{ item.service_state | default('IN_SERVICE') }}"
+        gateway_pool_id: "{{ item.gateway_pool_id | default(vco_gateway_pool_id) | int }}"
+        parameters: "{{ item.parameters | default({}) }}"
+      loop: "{{ velocloud_gateways }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: gateway_results
+      no_log: true
+
+    - name: Report gateway IDs
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }} id={{ item.gateway.id | default('n/a') }} changed={{ item.changed }}"
+      loop: "{{ gateway_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"

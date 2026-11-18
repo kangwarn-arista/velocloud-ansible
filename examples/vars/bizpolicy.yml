@@ -1,0 +1,25 @@
+---
+# Realtime business policy that prefers the private wired link group.
+velocloud_bizpolicy_edge: branch-ha
+velocloud_bizpolicy_segment: Global Segment
+velocloud_bizpolicy:
+  - name: RTSP-RTP
+    state: present
+    match:
+      sip: any
+      ssm: "255.255.255.255"
+      dip: any
+      dsm: "255.255.255.255"
+      appid: 175
+    action:
+      route_type: edge2Any
+      service_class: realtime
+      route_policy: auto
+      link_policy: preferred
+      service_group: PRIVATE_WIRED
+      qos:
+        priority: high
+      sla:
+        latency_ms: "0"
+        jitter_ms: "0"
+        loss_pct: "0.0"

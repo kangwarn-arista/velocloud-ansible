@@ -1,0 +1,32 @@
+---
+# Apply a realtime business-policy rule that prefers the private wired link group.
+# Run create_edges.yml first so branch-ha exists.
+#
+#   uv run ansible-playbook examples/configure_bizpolicy.yml \
+#       -e vco_host=vco.example.com -e vco_enterprise_id=1
+#
+- name: Configure business policy
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/auth.yml
+    - vars/bizpolicy.yml
+  pre_tasks:
+    - name: Load the saved API token
+      ansible.builtin.import_tasks: tasks/load_saved_token.yml
+
+    - name: Require an enterprise ID
+      ansible.builtin.assert:
+        that: vco_enterprise_id | default(0) | int > 0
+        fail_msg: Pass -e vco_enterprise_id=<id> from create_enterprise.yml.
+  tasks:
+    - name: Apply business policy on "{{ velocloud_bizpolicy_edge }}"
+      velocloud.api.edge_segment:
+        vco_host: "{{ vco_host }}"
+        api_token: "{{ vco_effective_token }}"
+        verify_ssl: "{{ vco_verify_ssl | default(true) }}"
+        enterprise_id: "{{ vco_enterprise_id | default(omit) }}"
+        edge: "{{ velocloud_bizpolicy_edge }}"
+        segment_id: "{{ velocloud_bizpolicy_segment }}"
+        bizpolicy: "{{ velocloud_bizpolicy }}"
