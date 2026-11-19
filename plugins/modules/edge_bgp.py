@@ -80,7 +80,7 @@ options:
         description: Advertise overlay prefix.
         required: false
         type: bool
-        default: false
+        default: true
     propagate_uplink:
         description: Propagate uplink.
         required: false
@@ -321,7 +321,7 @@ def main() -> None:
         enabled=dict(type="bool", default=True),
         asn=dict(type="str", required=True),
         connected_routes=dict(type="bool", default=True),
-        overlay_prefix=dict(type="bool", default=False),
+        overlay_prefix=dict(type="bool", default=True),
         propagate_uplink=dict(type="bool", default=False),
         router_id=dict(type="str"),
         keepalive=dict(type="str", default="60"),

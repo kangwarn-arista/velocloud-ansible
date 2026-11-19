@@ -64,7 +64,19 @@ options:
         required: false
         type: int
     routed_interfaces:
-        description: List of LAN routed interface specs.
+        description:
+            - List of LAN routed interface specs.
+            - Each entry takes C(name), C(segment_id) (a segment name),
+              C(addressing) (C(type), C(cidr), C(gateway)), C(advertise),
+              C(override), C(disabled), C(nat_direct), C(dhcp_server) and
+              C(subinterfaces). Each sub-interface takes C(subinterface_id),
+              C(vlan_id), C(segment_id), C(addressing) and C(advertise).
+            - Any other key, on an interface or a sub-interface, is passed to
+              the field of that name of pyvelo's C(RoutedInterfaceGe) or
+              C(RoutedSubInterface), snake_case or camelCase, and validated
+              by it (for example C(trusted), C(rpf), C(ping_response),
+              C(ospf)). Only the keys given are sent. A key pyvelo has no field
+              for, nested ones included, fails the task.
         required: false
         type: list
         elements: dict
@@ -113,6 +125,8 @@ EXAMPLES = r"""
             segment_id: Demo-Segment
             addressing: { type: STATIC, cidr: 172.24.9.1/24 }
             advertise: true
+            trusted: true
+            rpf: LOOSE
     switched_interfaces:
       - name: GE1
         port_mode: access
