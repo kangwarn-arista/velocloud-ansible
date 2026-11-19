@@ -27,6 +27,11 @@
 - Keep `orchestrator_service_reachable` and
   `orchestrator_service_reachable_backup` on `wan_link_settings` (PRIVATE
   links). Unknown `WanLink` keys are forwarded instead of being dropped.
+- `edge_lan` routed interfaces and sub-interfaces forward any key they do not
+  declare to pyvelo's `RoutedInterfaceGe` / `RoutedSubInterface` (for example
+  `trusted` and `rpf`), validated by it. A key pyvelo has no field for fails
+  the task instead of being dropped, here and on `wan_link_settings` and BGP
+  neighbors.
 - Attach profile segments with factory defaults across device settings, QoS,
   and firewall, preserving existing segment settings and avoiding duplicates.
 - Single `requirements.txt` runtime (requests, Pydantic 2, loguru, pyvelo,

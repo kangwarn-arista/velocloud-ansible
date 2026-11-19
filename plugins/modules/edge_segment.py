@@ -85,7 +85,7 @@ options:
             overlay_prefix:
                 description: Advertise overlay prefix.
                 type: bool
-                default: false
+                default: true
             propagate_uplink:
                 description: Propagate uplink.
                 type: bool
@@ -106,7 +106,10 @@ options:
                 type: bool
                 default: false
             neighbors:
-                description: List of BGP neighbor specs.
+                description: >
+                    List of BGP neighbor specs. Each entry needs C(neighbor_ip)
+                    and C(neighbor_as); any other pyvelo C(BgpNeighbor) field
+                    (e.g. C(default_route), C(enable_bfd)) is passed through.
                 type: list
                 elements: dict
                 default: []
@@ -552,7 +555,7 @@ def main() -> None:
                 enabled=dict(type="bool", default=True),
                 asn=dict(type="str", required=True),
                 connected_routes=dict(type="bool", default=True),
-                overlay_prefix=dict(type="bool", default=False),
+                overlay_prefix=dict(type="bool", default=True),
                 propagate_uplink=dict(type="bool", default=False),
                 router_id=dict(type="str"),
                 keepalive=dict(type="str", default="60"),

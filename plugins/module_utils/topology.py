@@ -39,11 +39,12 @@ Public surface:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+import types
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 from uuid import UUID
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from pydantic_core import MISSING
 
 from pyvelo.client import VcoClient
@@ -60,6 +61,10 @@ from pyvelo.client.models.configuration.device_settings.common import (
     WanOverlay,
 )
 from pyvelo.client.models.configuration.device_settings.lan import LanPortMode
+from pyvelo.client.models.configuration.device_settings.routed_interface import (
+    RoutedInterfaceGe,
+    RoutedSubInterface,
+)
 from pyvelo.client.models.configuration.device_settings.refs import (
     DeviceSettingsRefs,
     DeviceSettingsSegmentRef,
@@ -128,6 +133,7 @@ from pyvelo.client.schemas.enterprise import (
 from pyvelo.client.schemas.profiles import CreateProfile, GetEnterpriseConfigurations
 from pyvelo_intent.config.pipeline import ConfigPipeline
 from pyvelo_intent.config.state import ConfigState
+from pyvelo.core.base import VcoModel
 from pyvelo.core.identity import SegmentIdentity
 
 
@@ -165,6 +171,99 @@ def addressing_patch(
         if gateway:
             patch["gateway"] = gateway
     return patch
+
+
+# ---------------------------------------------------------------------------
+# Pass-through of host vars keys to pyvelo models
+# ---------------------------------------------------------------------------
+
+
+def _vco_models_in(annotation: Any) -> list[type[VcoModel]]:
+    """The VcoModel classes a field holds, directly, in a union or as list items."""
+    if isinstance(annotation, type) and issubclass(annotation, VcoModel):
+        return [annotation]
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return _vco_models_in(get_args(annotation)[0])
+    if origin in (Union, types.UnionType, list):
+        return [m for arg in get_args(annotation) for m in _vco_models_in(arg)]
+    return []
+
+
+def unknown_keys(
+    model: type[VcoModel], data: dict[str, Any], prefix: str = ""
+) -> list[str]:
+    """Keys of data (dotted, nested ones included) that model has no field for.
+
+    pyvelo ignores unknown keys both when validating and in merge_patch, so a
+    misspelled key in host vars would otherwise be dropped without a word.
+    """
+    alias_map = model._alias_map()
+    unknown: list[str] = []
+    for key, value in data.items():
+        path = f"{prefix}{key}"
+        name = alias_map.get(key)
+        if name is None:
+            unknown.append(path)
+            continue
+        nested = _vco_models_in(model.model_fields[name].annotation)
+        if len(nested) != 1:
+            continue
+        if isinstance(value, dict):
+            unknown += unknown_keys(nested[0], value, f"{path}.")
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                if isinstance(item, dict):
+                    unknown += unknown_keys(nested[0], item, f"{path}[{i}].")
+    return unknown
+
+
+def check_extra_keys(spec: BaseModel, model: type[VcoModel], where: str) -> None:
+    """Refuse the keys of spec that are neither declared on it nor fields of model."""
+    unknown = unknown_keys(model, spec.model_extra or {})
+    if unknown:
+        raise ValueError(
+            f"{where}: unknown key(s) {', '.join(repr(k) for k in unknown)}; "
+            f"not a field of pyvelo {model.__name__}"
+        )
+
+
+def passthrough_fields(
+    spec: BaseModel,
+    model: type[VcoModel],
+    where: str,
+    required: dict[str, Any],
+    managed: set[str],
+) -> dict[str, Any]:
+    """The keys of spec its own fields do not declare, validated by model.
+
+    Lets host vars set any field of the pyvelo model without the input spec
+    naming it. Returns them by python name, holding only what was set, for the
+    module patch. required is what model needs to validate (its key fields);
+    managed are the patch keys the caller builds itself, which host vars may
+    not set by another spelling.
+    """
+    extras = dict(spec.model_extra or {})
+    if not extras:
+        return {}
+    check_extra_keys(spec, model, where)
+    alias_map = model._alias_map()
+    names = {alias_map[k] for k in extras}
+    clash = sorted(names & managed)
+    if clash:
+        raise ValueError(
+            f"{where}: {', '.join(repr(k) for k in clash)} is set by the collection; "
+            f"use the documented option instead"
+        )
+    try:
+        validated = model.model_validate({**required, **extras})
+    except ValidationError as e:
+        errors = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
+            for err in e.errors()
+        )
+        raise ValueError(f"{where}: {errors}") from None
+    return validated.model_dump(by_alias=False, exclude_unset=True, include=names)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +350,14 @@ class RoutedInterfaceAddressing(BaseModel):
 
 
 class SubInterfaceInput(BaseModel):
-    """Sub-interface — nested under a routed interface."""
+    """Sub-interface — nested under a routed interface.
+
+    Keys not declared here are forwarded as fields of pyvelo
+    ``RoutedSubInterface`` (e.g. ``trusted``, ``rpf``, ``ospf``), validated by
+    it; a key it has no field for is refused.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     subinterface_id: int
     vlan_id: int
@@ -268,7 +374,14 @@ class DhcpServerInput(BaseModel):
 
 
 class RoutedInterfaceInput(BaseModel):
-    """LAN-side routed interface — maps to device_settings.routed_interfaces."""
+    """LAN-side routed interface — maps to device_settings.routed_interfaces.
+
+    Keys not declared here are forwarded as fields of pyvelo
+    ``RoutedInterfaceGe`` (e.g. ``trusted``, ``rpf``), validated by it; a key
+    it has no field for is refused.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     name: str
     segment_id: str = "Global Segment"
@@ -323,6 +436,15 @@ class VlanInput(BaseModel):
 
 
 class BgpNeighborInput(BaseModel):
+    """BGP neighbor — maps to device_settings.segments.<segment>.bgp.neighbors.
+
+    Extra keys are kept so any pyvelo ``BgpNeighbor`` field in host vars
+    (e.g. ``default_route``) is forwarded to the patch (Pydantic would
+    otherwise drop them silently).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
     neighbor_ip: str
     neighbor_as: str
     description: str = ""
@@ -344,7 +466,7 @@ class BgpInput(BaseModel):
     asn: str
     segment_id: str = "Global Segment"
     connected_routes: bool = True
-    overlay_prefix: bool = False
+    overlay_prefix: bool = True
     propagate_uplink: bool = False
     router_id: str | None = None
     keepalive: str = "60"
@@ -1668,22 +1790,42 @@ async def apply_routed_interfaces(
                 seg_identity = await pipeline.resolvers.resolve(
                     SegmentIdentity, si.segment_id
                 )
-                subifs.append(
-                    {
-                        "subinterface_id": si.subinterface_id,
-                        "subinterface_type": "SUB_INTERFACE",
-                        "vlan_id": si.vlan_id,
-                        "segment_id": seg_identity.segment_id,
-                        "addressing": addressing_patch(
-                            si.addressing.type,
-                            si.addressing.cidr,
-                            si.addressing.gateway,
-                        ),
-                        "advertise": si.advertise,
-                        "override": True,
-                    }
+                sub: dict[str, Any] = {
+                    "subinterface_id": si.subinterface_id,
+                    "subinterface_type": "SUB_INTERFACE",
+                    "vlan_id": si.vlan_id,
+                    "segment_id": seg_identity.segment_id,
+                    "addressing": addressing_patch(
+                        si.addressing.type,
+                        si.addressing.cidr,
+                        si.addressing.gateway,
+                    ),
+                    "advertise": si.advertise,
+                    "override": True,
+                }
+                sub.update(
+                    passthrough_fields(
+                        si,
+                        RoutedSubInterface,
+                        f"{ri.name} subinterface {si.subinterface_id}",
+                        required={
+                            "subinterface_id": si.subinterface_id,
+                            "subinterface_type": "SUB_INTERFACE",
+                        },
+                        managed=set(sub),
+                    )
                 )
+                subifs.append(sub)
             iface["subinterfaces"] = subifs
+        iface.update(
+            passthrough_fields(
+                ri,
+                RoutedInterfaceGe,
+                ri.name,
+                required={"name": ri.name},
+                managed=set(iface) | {"name", "addressing", "dhcp_server"},
+            )
+        )
         patch[ri.name] = iface
     switched_cleanup = {ri.name: None for ri in specs}
     return await pipeline.apply(
@@ -1781,6 +1923,7 @@ async def apply_wan_link_settings(
         return state
     patch: dict[str, Any] = {}
     for cfg in specs:
+        check_extra_keys(cfg, WanLink, cfg.name)
         raw = cfg.model_dump(exclude_unset=True)
         name = raw.pop("name")
         link = WanLink.model_validate({"name": name, **raw})
@@ -1796,6 +1939,7 @@ async def apply_bgp(
     """Patch device_settings.segments.<segment>.bgp."""
     neighbors_patch: dict[str, Any] = {}
     for n in spec.neighbors:
+        check_extra_keys(n, BgpNeighbor, f"BGP neighbor {n.neighbor_ip}")
         raw = n.model_dump(exclude_unset=True, exclude={"description"})
         neighbor = BgpNeighbor.model_validate(raw)
         dumped = neighbor.model_dump(by_alias=True, exclude_unset=True)
